@@ -2,6 +2,7 @@ google-search-results
 openai
 streamlit
 serpapi
-gTTS
-bs4
-loguru
+Python 3.x
+Streamlit
+Pandas
+
