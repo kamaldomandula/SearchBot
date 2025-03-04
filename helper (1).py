@@ -1,114 +1,134 @@
-import json
 import os
+import json
+import asyncio
+import sys
 from datetime import datetime
-from typing import Dict, List
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import quote_plus
-import random
-from gtts import gTTS
-from groq import Groq
-from dotenv import load_dotenv
-import time
+from typing import Dict, List, Any
 
-load_dotenv()
+try:
+    import streamlit as st
+    STREAMLIT_AVAILABLE = True
+except ModuleNotFoundError:
+    STREAMLIT_AVAILABLE = False
 
-class WebSearch:
-    def __init__(self):
-        # Rotate between different user agents to avoid detection
-        self.user_agents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0'
+# Check platform compatibility for grp module
+if sys.platform.startswith("linux") or sys.platform == "darwin":
+    try:
+        import grp
+        GRP_AVAILABLE = True
+    except ModuleNotFoundError:
+        GRP_AVAILABLE = False
+else:
+    GRP_AVAILABLE = False
+
+# Handle missing helper module gracefully
+try:
+    from helper import ChatBot, current_year, save_to_audio
+    HELPER_AVAILABLE = True
+except ImportError:
+    HELPER_AVAILABLE = False
+
+# Dummy search function to replace DuckDuckGo news search
+def fetch_search_results(query: str, location: str, num: int, time_filter: str) -> Dict[str, Any]:
+    """
+    Mock function to simulate search results.
+    """
+    return {
+        "status": "success",
+        "results": [
+            {
+                "title": f"Sample news about {query}",
+                "link": "https://example.com/news",
+                "summary": f"Summary of the latest {query} news.",
+                "rating": "4.5"
+            }
+            for _ in range(num)
         ]
+    }
 
-    def _get_random_headers(self):
-        return {
-            'User-Agent': random.choice(self.user_agents),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        }
+if STREAMLIT_AVAILABLE:
+    # Set Streamlit layout
+    st.set_page_config(layout="wide")
+    st.title("SearchBot 🤖")
 
-    def search(self, query: str, num_results: int = 10) -> Dict[str, any]:
-        """
-        Scrape DuckDuckGo search results
-        """
-        encoded_query = quote_plus(query)
-        url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+    # Sidebar for settings
+    with st.sidebar:
+        num: int = st.number_input("📊 Number of results", value=3, step=1, min_value=1, max_value=10)
+        location: str = st.text_input("🌍 Location (e.g., us-en, in-en)", value="us-en")
+        time_filter: str = st.selectbox("⏳ Time filter", ["Past Day", "Past Week", "Past Month", "Past Year"], index=1)
+        
+        time_mapping = {"Past Day": "d", "Past Week": "w", "Past Month": "m", "Past Year": "y"}
+        time_filter = time_mapping[time_filter]
+        only_use_chatbot: bool = st.checkbox("💬 Only use chatbot (Disable Search)")
+        
+        if st.button("🧹 Clear Session"):
+            st.session_state.messages = []
+            st.rerun()
+        
+        if HELPER_AVAILABLE:
+            st.markdown(f"<h6>📅 Copyright © 2010-{current_year()} Present</h6>", unsafe_allow_html=True)
+
+    # Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    # Display chat history
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    if prompt := st.chat_input("Ask anything!"):
+        st.chat_message("user").markdown(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        ref_table_string = "**No references found.**"
+        search_results = {"status": "failure", "results": []}
         
         try:
-            response = requests.get(url, headers=self._get_random_headers())
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.text, 'html.parser')
-            results = []
-            
-            # Find all result containers
-            for result in soup.select('.result')[:num_results]:
-                title_elem = result.select_one('.result__title')
-                link_elem = result.select_one('.result__url')
-                snippet_elem = result.select_one('.result__snippet')
+            with st.spinner("Searching..."):
+                if not only_use_chatbot:
+                    search_results = fetch_search_results(query=prompt, location=location, num=num, time_filter=time_filter)
+                    
+                response = """Here are your search results:
+                """
                 
-                if title_elem and link_elem:
-                    results.append({
-                        'title': title_elem.get_text(strip=True),
-                        'link': link_elem.get('href', ''),
-                        'snippet': snippet_elem.get_text(strip=True) if snippet_elem else ''
-                    })
-            
-            return {"data": results}
-            
+                if search_results["status"] == "success":
+                    md_data = search_results["results"]
+                    ref_table_string = "| Num | Title | Rating | Context |\n|---|------|--------|---------|\n"
+                    
+                    for idx, res in enumerate(md_data, start=1):
+                        title = f"[{res['title']}]({res['link']})"
+                        stars = "⭐" * int(float(res.get('rating', '0')))
+                        summary = res.get('summary', '')[:100] + "..."
+                        ref_table_string += f"| {idx} | {title} | {stars} | {summary} |\n"
+                    
+                if HELPER_AVAILABLE:
+                    bot = ChatBot()
+                    bot.history = st.session_state.messages.copy()
+                    response = bot.generate_response(f"User prompt: {prompt}\n\nContext: {', '.join(res.get('summary', '') for res in search_results['results'])}")
+                else:
+                    response = "Chatbot functionality is unavailable. Please check the helper module installation."
+        
         except Exception as e:
-            print(f"An error occurred: {e}")
-            return {"status": "error", "message": str(e)}
+            st.warning(f"Error fetching data: {e}")
+            response = "We encountered an issue. Please try again later."
+        
+        if HELPER_AVAILABLE:
+            save_to_audio(response)
+        
+        with st.chat_message("assistant"):
+            st.markdown(response, unsafe_allow_html=True)
+            if HELPER_AVAILABLE:
+                st.audio("output.mp3", format="audio/mpeg", loop=True)
+            with st.expander("References:", expanded=True):
+                st.markdown(ref_table_string, unsafe_allow_html=True)
+        
+        st.session_state.messages.append({"role": "assistant", "content": f"{response}\n\n{ref_table_string}"})
+else:
+    print("Streamlit is not installed. Please install it using `pip install streamlit` to run this application.")
 
-def current_year() -> int:
-    now: datetime = datetime.now()
-    return now.year
+if not GRP_AVAILABLE:
+    print("The 'grp' module is not available in this environment. Skipping grp-related functionality.")
 
-def save_to_audio(text: str) -> None:
-    tts = gTTS(text=text, lang="en")
-    tts.save("output.mp3")
-
-class ChatBot:
-    """
-    Chatbot using Llama-3.3 through Groq's API with JSON response format
-    """
-    def __init__(self):
-        self.client = Groq(
-            api_key=os.environ["GROQ_API_KEY"],
-        )
-        self.history = [{"role": "system", "content": "You are a helpful assistant. IMPORTANT: Always format your responses as valid JSON with a 'response' field containing your message."}]
-        self.search_engine = WebSearch()
-    
-    def search(self, query: str, num_results: int = 10) -> str:
-        """
-        Perform a search using DuckDuckGo and return JSON response
-        """
-        response = self.search_engine.search(query, num_results)
-        return json.dumps(response)
-    
-    def generate_response(self, prompt: str) -> str:
-        """
-        Generate a response using Llama-3.3 through Groq with JSON format
-        """
-        
-        self.history.append({"role": "user", "content": prompt})
-        
-        completion = self.client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=self.history,
-            temperature=0.7,
-            top_p=1,
-            stream=False
-            
-        )
-        
-        response = completion.choices[0].message.content
-        
-        self.history.append({"role": "assistant", "content": response})
-        
-        return response
+if not HELPER_AVAILABLE:
+    print("The 'helper' module is not available. Chatbot features will be disabled.")
